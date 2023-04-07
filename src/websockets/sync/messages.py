@@ -72,8 +72,10 @@ class Assembler:
 
         Raises:
             EOFError: If the stream of frames has ended.
-            RuntimeError: If two threads run :meth:`get` or :meth:``get_iter`
+            RuntimeError: If two threads run :meth:`get` or :meth:`get_iter`
                 concurrently.
+            TimeoutError: If a timeout is provided and elapses before a
+                complete message is received.
 
         """
         with self.mutex:
@@ -131,7 +133,7 @@ class Assembler:
 
         Raises:
             EOFError: If the stream of frames has ended.
-            RuntimeError: If two threads run :meth:`get` or :meth:``get_iter`
+            RuntimeError: If two threads run :meth:`get` or :meth:`get_iter`
                 concurrently.
 
         """
@@ -159,11 +161,10 @@ class Assembler:
             self.get_in_progress = True
 
         # Locking with get_in_progress ensures only one thread can get here.
-        yield from chunks
-        while True:
-            chunk = self.chunks_queue.get()
-            if chunk is None:
-                break
+        chunk: Optional[Data]
+        for chunk in chunks:
+            yield chunk
+        while (chunk := self.chunks_queue.get()) is not None:
             yield chunk
 
         with self.mutex:
@@ -242,6 +243,7 @@ class Assembler:
             self.put_in_progress = True
 
         # Release the lock to allow get() to run and eventually set the event.
+        # Locking with get_in_progress ensures only one coroutine can get here.
         self.message_fetched.wait()
 
         with self.mutex:
