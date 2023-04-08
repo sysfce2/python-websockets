@@ -11,6 +11,7 @@ import threading
 from types import TracebackType
 from typing import Any, Callable, Optional, Sequence, Type
 
+from ..asyncio.deadline import Deadline
 from ..extensions.base import ServerExtensionFactory
 from ..extensions.permessage_deflate import enable_server_permessage_deflate
 from ..frames import CloseCode
@@ -21,7 +22,6 @@ from ..protocol import CONNECTING, OPEN, Event
 from ..server import ServerProtocol
 from ..typing import LoggerLike, Origin, Subprotocol
 from .connection import Connection
-from .utils import Deadline
 
 
 __all__ = ["serve", "unix_serve", "ServerConnection", "WebSocketServer"]

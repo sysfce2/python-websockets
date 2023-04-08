@@ -1,6 +1,6 @@
 import unittest
 
-from websockets.sync.utils import *
+from websockets.asyncio.deadline import *
 
 from ..utils import MS
 

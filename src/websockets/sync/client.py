@@ -5,6 +5,7 @@ import ssl
 import threading
 from typing import Any, Optional, Sequence, Type
 
+from ..asyncio.deadline import Deadline
 from ..client import ClientProtocol
 from ..datastructures import HeadersLike
 from ..extensions.base import ClientExtensionFactory
@@ -16,7 +17,6 @@ from ..protocol import CONNECTING, OPEN, Event
 from ..typing import LoggerLike, Origin, Subprotocol
 from ..uri import parse_uri
 from .connection import Connection
-from .utils import Deadline
 
 
 __all__ = ["connect", "unix_connect", "ClientConnection"]
