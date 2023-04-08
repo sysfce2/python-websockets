@@ -29,7 +29,7 @@ __all__ = ["serve", "unix_serve", "ServerConnection", "WebSocketServer"]
 
 class ServerConnection(Connection):
     """
-    Threaded implementation of a WebSocket server connection.
+    :mod:`threading` implementation of a WebSocket server connection.
 
     :class:`ServerConnection` provides :meth:`recv` and :meth:`send` methods for
     receiving and sending messages.

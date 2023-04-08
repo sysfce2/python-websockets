@@ -1,21 +1,28 @@
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import logging
 import random
-import socket
 import struct
-import threading
 import uuid
 from types import TracebackType
-from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Type, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    Type,
+    Union,
+)
 
 from ..asyncio.deadline import Deadline
-from ..exceptions import ConnectionClosed, ConnectionClosedOK, ProtocolError
-from ..frames import DATA_OPCODES, BytesLike, CloseCode, Frame, Opcode, prepare_ctrl
+from ..exceptions import ConnectionClosed, ConnectionClosedOK
+from ..frames import DATA_OPCODES, BytesLike, Frame, Opcode, prepare_ctrl
 from ..http11 import Request, Response
-from ..protocol import CLOSED, OPEN, Event, Protocol, State
-from ..typing import Data, LoggerLike, Subprotocol
+from ..protocol import Event, Protocol
+from ..typing import AsyncIterator, Data, LoggerLike, Subprotocol
 from .messages import Assembler
 
 
@@ -24,29 +31,25 @@ __all__ = ["Connection"]
 logger = logging.getLogger(__name__)
 
 
-class Connection:
+class Connection(asyncio.Protocol):
     """
-    :mod:`threading` implementation of a WebSocket connection.
+    :mod:`asyncio` implementation of a WebSocket connection.
 
     :class:`Connection` provides APIs shared between WebSocket servers and
     clients.
 
     You shouldn't use it directly. Instead, use
-    :class:`~websockets.sync.client.ClientConnection` or
-    :class:`~websockets.sync.server.ServerConnection`.
+    :class:`~websockets.asyncio.client.ClientConnection` or
+    :class:`~websockets.asyncio.server.ServerConnection`.
 
     """
 
-    recv_bufsize = 65536
-
     def __init__(
         self,
-        socket: socket.socket,
         protocol: Protocol,
         *,
         close_timeout: Optional[float] = 10,
-    ) -> None:
-        self.socket = socket
+    ):
         self.protocol = protocol
         self.close_timeout = close_timeout
 
@@ -69,9 +72,6 @@ class Connection:
         self.response: Optional[Response] = None
         """Opening handshake response."""
 
-        # Mutex serializing interactions with the protocol.
-        self.protocol_mutex = threading.Lock()
-
         # Assembler turning frames into messages and serializing reads.
         self.recv_messages = Assembler()
 
@@ -82,11 +82,7 @@ class Connection:
         self.close_deadline: Optional[Deadline] = None
 
         # Mapping of ping IDs to pong waiters, in chronological order.
-        self.pings: Dict[bytes, threading.Event] = {}
-
-        # Receiving events from the socket.
-        self.recv_events_thread = threading.Thread(target=self.recv_events)
-        self.recv_events_thread.start()
+        self.pings: Dict[bytes, asyncio.Future] = {}
 
         # Exception raised in recv_events, to be chained to ConnectionClosed
         # in the user thread in order to show why the TCP connection dropped.
@@ -105,7 +101,7 @@ class Connection:
         See :meth:`~socket.socket.getsockname`.
 
         """
-        return self.socket.getsockname()
+        return self.transport.get_extra_info("sockname")
 
     @property
     def remote_address(self) -> Any:
@@ -118,7 +114,7 @@ class Connection:
         See :meth:`~socket.socket.getpeername`.
 
         """
-        return self.socket.getpeername()
+        return self.transport.get_extra_info("peername")
 
     @property
     def subprotocol(self) -> Optional[Subprotocol]:
@@ -132,21 +128,18 @@ class Connection:
 
     # Public methods
 
-    def __enter__(self) -> Connection:
+    async def __aenter__(self) -> Connection:
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         exc_type: Optional[Type[BaseException]],
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
-        if exc_type is None:
-            self.close()
-        else:
-            self.close(CloseCode.INTERNAL_ERROR)
+        await self.close(1000 if exc_type is None else 1011)
 
-    def __iter__(self) -> Iterator[Data]:
+    async def __aiter__(self) -> Iterator[Data]:
         """
         Iterate on incoming messages.
 
@@ -159,11 +152,11 @@ class Connection:
         """
         try:
             while True:
-                yield self.recv()
+                yield await self.recv()
         except ConnectionClosedOK:
             return
 
-    def recv(self, timeout: Optional[float] = None) -> Data:
+    async def recv(self) -> Data:
         """
         Receive the next message.
 
@@ -174,10 +167,11 @@ class Connection:
         error or a network failure. This is how you detect the end of the
         message stream.
 
-        If ``timeout`` is :obj:`None`, block until a message is received. If
-        ``timeout`` is set and no message is received within ``timeout``
-        seconds, raise :exc:`TimeoutError`. Set ``timeout`` to ``0`` to check if
-        a message was already received.
+        Canceling :meth:`recv` is safe. There's no risk of losing the next
+        message. The next invocation of :meth:`recv` will return it.
+
+        This makes it possible to enforce a timeout by wrapping :meth:`recv` in
+        :func:`~asyncio.timeout` or :func:`~asyncio.wait_for`.
 
         If the message is fragmented, wait until all fragments are received,
         reassemble them, and return the whole message.
@@ -191,21 +185,21 @@ class Connection:
 
         Raises:
             ConnectionClosed: When the connection is closed.
-            RuntimeError: If two threads call :meth:`recv` or
+            RuntimeError: If two coroutines call :meth:`recv` or
                 :meth:`recv_streaming` concurrently.
 
         """
         try:
-            return self.recv_messages.get(timeout)
+            return await self.recv_messages.get()
         except EOFError:
             raise self.protocol.close_exc from self.recv_events_exc
         except RuntimeError:
             raise RuntimeError(
-                "cannot call recv while another thread "
+                "cannot call recv while another coroutine "
                 "is already running recv or recv_streaming"
             ) from None
 
-    def recv_streaming(self) -> Iterator[Data]:
+    async def recv_streaming(self) -> AsyncIterator[Data]:
         """
         Receive the next message frame by frame.
 
@@ -229,7 +223,7 @@ class Connection:
 
         """
         try:
-            for frame in self.recv_messages.get_iter():
+            async for frame in self.recv_messages.get_iter():
                 yield frame
         except EOFError:
             raise self.protocol.close_exc from self.recv_events_exc
@@ -239,7 +233,7 @@ class Connection:
                 "is already running recv or recv_streaming"
             ) from None
 
-    def send(self, message: Union[Data, Iterable[Data]]) -> None:
+    async def send(self, message: Union[Data, Iterable[Data]]) -> None:
         """
         Send a message.
 
@@ -274,7 +268,7 @@ class Connection:
 
         Raises:
             ConnectionClosed: When the connection is closed.
-            RuntimeError: If the connection is sending a fragmented message.
+            RuntimeError: If the connection busy sending a fragmented message.
             TypeError: If ``message`` doesn't have a supported type.
 
         """
@@ -376,22 +370,18 @@ class Connection:
                 # We're half-way through a fragmented message and we can't
                 # complete it. This makes the connection unusable.
                 with self.send_context():
-                    self.protocol.fail(
-                        CloseCode.INTERNAL_ERROR,
-                        "error in fragmented message",
-                    )
+                    self.protocol.fail(1011, "error in fragmented message")
                 raise
 
         else:
             raise TypeError("data must be bytes, str, or iterable")
 
-    def close(self, code: int = CloseCode.NORMAL_CLOSURE, reason: str = "") -> None:
+    def close(self, code: int = 1000, reason: str = "") -> None:
         """
         Perform the closing handshake.
 
-        :meth:`close` waits for the other end to complete the handshake, for the
-        TCP connection to terminate, and for all incoming messages to be read
-        with :meth:`recv`.
+        :meth:`close` waits for the other end to complete the handshake and
+        for the TCP connection to terminate.
 
         :meth:`close` is idempotent: it doesn't do anything once the
         connection is closed.
@@ -406,10 +396,7 @@ class Connection:
             # to terminate after calling a method that sends a close frame.
             with self.send_context():
                 if self.send_in_progress:
-                    self.protocol.fail(
-                        CloseCode.INTERNAL_ERROR,
-                        "close during fragmented message",
-                    )
+                    self.protocol.fail(1011, "close during fragmented message")
                 else:
                     self.protocol.send_close(code, reason)
         except ConnectionClosed:
@@ -417,7 +404,7 @@ class Connection:
             # They mean that the connection is closed, which was the goal.
             pass
 
-    def ping(self, data: Optional[Data] = None) -> threading.Event:
+    def ping(self, data: Optional[Data] = None) -> asyncio.Future[None]:
         """
         Send a Ping_.
 
@@ -457,12 +444,12 @@ class Connection:
             while data is None or data in self.pings:
                 data = struct.pack("!I", random.getrandbits(32))
 
-            pong_waiter = threading.Event()
+            pong_waiter = self.loop.create_future()
             self.pings[data] = pong_waiter
             self.protocol.send_ping(data)
             return pong_waiter
 
-    def pong(self, data: Data = b"") -> None:
+    async def pong(self, data: Data = b"") -> None:
         """
         Send a Pong_.
 
@@ -493,282 +480,56 @@ class Connection:
         """
         assert isinstance(event, Frame)
         if event.opcode in DATA_OPCODES:
-            self.recv_messages.put(event)
+            self.recv_messages.put(event)  # XXX
 
         if event.opcode is Opcode.PONG:
             self.acknowledge_pings(bytes(event.data))
 
-    def acknowledge_pings(self, data: bytes) -> None:
-        """
-        Acknowledge pings when receiving a pong.
+    # asyncio.Protocol methods
 
-        """
-        with self.protocol_mutex:
-            # Ignore unsolicited pong.
-            if data not in self.pings:
-                return
-            # Sending a pong for only the most recent ping is legal.
-            # Acknowledge all previous pings too in that case.
-            ping_id = None
-            ping_ids = []
-            for ping_id, ping in self.pings.items():
-                ping_ids.append(ping_id)
-                ping.set()
-                if ping_id == data:
-                    break
-            else:
-                raise AssertionError("solicited pong not found in pings")
-            # Remove acknowledged pings from self.pings.
-            for ping_id in ping_ids:
-                del self.pings[ping_id]
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        self.transport = transport
+        # TODO set write buffer limits
 
-    def recv_events(self) -> None:
-        """
-        Read incoming data from the socket and process events.
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        ...
 
-        Run this method in a thread as long as the connection is alive.
+    # TODO error handling
+    def data_received(self, data: bytes) -> None:
+        # Feed incoming data to the protocol.
+        self.protocol.receive_data(data)
 
-        ``recv_events()`` exits immediately when the ``self.socket`` is closed.
+        # This isn't expected to raise an exception.
+        events = self.protocol.events_received()
 
-        """
         try:
-            while True:
-                try:
-                    if self.close_deadline is not None:
-                        self.socket.settimeout(self.close_deadline.timeout())
-                    data = self.socket.recv(self.recv_bufsize)
-                except Exception as exc:
-                    if self.debug:
-                        self.logger.debug("error while receiving data", exc_info=True)
-                    # When the closing handshake is initiated by our side,
-                    # recv() may block until send_context() closes the socket.
-                    # In that case, send_context() already set recv_events_exc.
-                    # Calling set_recv_events_exc() avoids overwriting it.
-                    with self.protocol_mutex:
-                        self.set_recv_events_exc(exc)
-                    break
-
-                if data == b"":
-                    break
-
-                # Acquire the connection lock.
-                with self.protocol_mutex:
-                    # Feed incoming data to the protocol.
-                    self.protocol.receive_data(data)
-
-                    # This isn't expected to raise an exception.
-                    events = self.protocol.events_received()
-
-                    # Write outgoing data to the socket.
-                    try:
-                        self.send_data()
-                    except Exception as exc:
-                        if self.debug:
-                            self.logger.debug("error while sending data", exc_info=True)
-                        # Similarly to the above, avoid overriding an exception
-                        # set by send_context(), in case of a race condition
-                        # i.e. send_context() closes the socket after recv()
-                        # returns above but before send_data() calls send().
-                        self.set_recv_events_exc(exc)
-                        break
-
-                    if self.protocol.close_expected():
-                        # If the connection is expected to close soon, set the
-                        # close deadline based on the close timeout.
-                        if self.close_deadline is None:
-                            self.close_deadline = Deadline(self.close_timeout)
-
-                # Unlock conn_mutex before processing events. Else, the
-                # application can't send messages in response to events.
-
-                # If self.send_data raised an exception, then events are lost.
-                # Given that automatic responses write small amounts of data,
-                # this should be uncommon, so we don't handle the edge case.
-
-                try:
-                    for event in events:
-                        # This may raise EOFError if the closing handshake
-                        # times out while a message is waiting to be read.
-                        self.process_event(event)
-                except EOFError:
-                    break
-
-            # Breaking out of the while True: ... loop means that we believe
-            # that the socket doesn't work anymore.
-            with self.protocol_mutex:
-                # Feed the end of the data stream to the protocol.
-                self.protocol.receive_eof()
-
-                # This isn't expected to generate events.
-                assert not self.protocol.events_received()
-
-                # There is no error handling because send_data() can only write
-                # the end of the data stream here and it handles errors itself.
-                self.send_data()
-
+            self.send_data()
         except Exception as exc:
-            # This branch should never run. It's a safety net in case of bugs.
-            self.logger.error("unexpected internal error", exc_info=True)
-            with self.protocol_mutex:
-                self.set_recv_events_exc(exc)
-            # We don't know where we crashed. Force protocol state to CLOSED.
-            self.protocol.state = CLOSED
-        finally:
-            # This isn't expected to raise an exception.
-            self.close_socket()
+            if self.debug:
+                self.logger.debug("error while sending data", exc_info=True)
+            # Similarly to the above, avoid overriding an exception
+            # set by send_context(), in case of a race condition
+            # i.e. send_context() closes the socket after recv()
+            # returns above but before send_data() calls send().
+            self.set_recv_events_exc(exc)
 
-    @contextlib.contextmanager
-    def send_context(
-        self,
-        *,
-        expected_state: State = OPEN,  # CONNECTING during the opening handshake
-    ) -> Iterator[None]:
-        """
-        Create a context for writing to the connection from user code.
-
-        On entry, :meth:`send_context` acquires the connection lock and checks
-        that the connection is open; on exit, it writes outgoing data to the
-        socket::
-
-            with self.send_context():
-                self.protocol.send_text(message.encode("utf-8"))
-
-        When the connection isn't open on entry, when the connection is expected
-        to close on exit, or when an unexpected error happens, terminating the
-        connection, :meth:`send_context` waits until the connection is closed
-        then raises :exc:`~websockets.exceptions.ConnectionClosed`.
-
-        """
-        # Should we wait until the connection is closed?
-        wait_for_close = False
-        # Should we close the socket and raise ConnectionClosed?
-        raise_close_exc = False
-        # What exception should we chain ConnectionClosed to?
-        original_exc: Optional[BaseException] = None
-
-        # Acquire the protocol lock.
-        with self.protocol_mutex:
-            if self.protocol.state is expected_state:
-                # Let the caller interact with the protocol.
-                try:
-                    yield
-                except (ProtocolError, RuntimeError):
-                    # The protocol state wasn't changed. Exit immediately.
-                    raise
-                except Exception as exc:
-                    self.logger.error("unexpected internal error", exc_info=True)
-                    # This branch should never run. It's a safety net in case of
-                    # bugs. Since we don't know what happened, we will close the
-                    # connection and raise the exception to the caller.
-                    wait_for_close = False
-                    raise_close_exc = True
-                    original_exc = exc
-                else:
-                    # Check if the connection is expected to close soon.
-                    if self.protocol.close_expected():
-                        wait_for_close = True
-                        # If the connection is expected to close soon, set the
-                        # close deadline based on the close timeout.
-
-                        # Since we tested earlier that protocol.state was OPEN
-                        # (or CONNECTING) and we didn't release protocol_mutex,
-                        # it is certain that self.close_deadline is still None.
-                        assert self.close_deadline is None
-                        self.close_deadline = Deadline(self.close_timeout)
-                    # Write outgoing data to the socket.
-                    try:
-                        self.send_data()
-                    except Exception as exc:
-                        if self.debug:
-                            self.logger.debug("error while sending data", exc_info=True)
-                        # While the only expected exception here is OSError,
-                        # other exceptions would be treated identically.
-                        wait_for_close = False
-                        raise_close_exc = True
-                        original_exc = exc
-
-            else:  # self.protocol.state is not expected_state
-                # Minor layering violation: we assume that the connection
-                # will be closing soon if it isn't in the expected state.
-                wait_for_close = True
-                raise_close_exc = True
-
-        # To avoid a deadlock, release the connection lock by exiting the
-        # context manager before waiting for recv_events() to terminate.
-
-        # If the connection is expected to close soon and the close timeout
-        # elapses, close the socket to terminate the connection.
-        if wait_for_close:
+        if self.protocol.close_expected():
+            # If the connection is expected to close soon, set the
+            # close deadline based on the close timeout.
             if self.close_deadline is None:
-                timeout = self.close_timeout
-            else:
-                # Thread.join() returns immediately if timeout is negative.
-                timeout = self.close_deadline.timeout(raise_if_elapsed=False)
-            self.recv_events_thread.join(timeout)
+                self.close_deadline = Deadline(self.close_timeout)
 
-            if self.recv_events_thread.is_alive():
-                # There's no risk to overwrite another error because
-                # original_exc is never set when wait_for_close is True.
-                assert original_exc is None
-                original_exc = TimeoutError("timed out while closing connection")
-                # Set recv_events_exc before closing the socket in order to get
-                # proper exception reporting.
-                raise_close_exc = True
-                with self.protocol_mutex:
-                    self.set_recv_events_exc(original_exc)
+        for event in events:
+            # This isn't expected to raise an exception.
+            self.process_event(event)
 
-        # If an error occurred, close the socket to terminate the connection and
-        # raise an exception.
-        if raise_close_exc:
-            self.close_socket()
-            self.recv_events_thread.join()
-            raise self.protocol.close_exc from original_exc
+    def eof_received(self) -> None:
+        # Feed the end of the data stream to the connection.
+        self.protocol.receive_eof()
 
-    def send_data(self) -> None:
-        """
-        Send outgoing data.
+        # This isn't expected to generate events.
+        assert not self.protocol.events_received()
 
-        This method requires holding protocol_mutex.
-
-        Raises:
-            OSError: When a socket operations fails.
-
-        """
-        assert self.protocol_mutex.locked()
-        for data in self.protocol.data_to_send():
-            if data:
-                if self.close_deadline is not None:
-                    self.socket.settimeout(self.close_deadline.timeout())
-                self.socket.sendall(data)
-            else:
-                try:
-                    self.socket.shutdown(socket.SHUT_WR)
-                except OSError:  # socket already closed
-                    pass
-
-    def set_recv_events_exc(self, exc: Optional[BaseException]) -> None:
-        """
-        Set recv_events_exc, if not set yet.
-
-        This method requires holding protocol_mutex.
-
-        """
-        assert self.protocol_mutex.locked()
-        if self.recv_events_exc is None:
-            self.recv_events_exc = exc
-
-    def close_socket(self) -> None:
-        """
-        Shutdown and close socket. Close message assembler.
-
-        Calling close_socket() guarantees that recv_events() terminates. Indeed,
-        recv_events() may block only on socket.recv() or on recv_messages.put().
-
-        """
-        # shutdown() is required to interrupt recv() on Linux.
-        try:
-            self.socket.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass  # socket is already closed
-        self.socket.close()
-        self.recv_messages.close()
+        # There is no error handling because send_data() can only write
+        # the end of the data stream here and it handles errors itself.
+        self.send_data()

@@ -24,7 +24,7 @@ __all__ = ["connect", "unix_connect", "ClientConnection"]
 
 class ClientConnection(Connection):
     """
-    Threaded implementation of a WebSocket client connection.
+    :mod:`threading` implementation of a WebSocket client connection.
 
     :class:`ClientConnection` provides :meth:`recv` and :meth:`send` methods for
     receiving and sending messages.
