@@ -21,8 +21,6 @@ from .messages import Assembler
 
 __all__ = ["Connection"]
 
-logger = logging.getLogger(__name__)
-
 
 class Connection:
     """

@@ -616,6 +616,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
            Stopping in the middle of a fragmented message will cause a
            protocol error and the connection will be closed.
 
+
         When the connection is closed, :meth:`send` raises
         :exc:`~websockets.exceptions.ConnectionClosed`. Specifically, it
         raises :exc:`~websockets.exceptions.ConnectionClosedOK` after a normal
@@ -624,8 +625,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         error or a network failure.
 
         Args:
-            message (Union[Data, Iterable[Data], AsyncIterable[Data]): message
-                to send.
+            message: message to send.
 
         Raises:
             ConnectionClosed: When the connection is closed.

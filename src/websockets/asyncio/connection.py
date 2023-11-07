@@ -8,27 +8,27 @@ import uuid
 from types import TracebackType
 from typing import (
     Any,
+    AsyncIterable,
+    AsyncIterator,
     Dict,
     Iterable,
     Iterator,
     Mapping,
     Optional,
+    Tuple,
     Type,
-    Union,
 )
 
 from ..asyncio.deadline import Deadline
 from ..exceptions import ConnectionClosed, ConnectionClosedOK
-from ..frames import DATA_OPCODES, BytesLike, Frame, Opcode, prepare_ctrl
+from ..frames import DATA_OPCODES, BytesLike, CloseCode, Frame, Opcode, prepare_ctrl
 from ..http11 import Request, Response
 from ..protocol import Event, Protocol
-from ..typing import AsyncIterator, Data, LoggerLike, Subprotocol
+from ..typing import Data, LoggerLike, Subprotocol
 from .messages import Assembler
 
 
 __all__ = ["Connection"]
-
-logger = logging.getLogger(__name__)
 
 
 class Connection(asyncio.Protocol):
@@ -75,14 +75,14 @@ class Connection(asyncio.Protocol):
         # Assembler turning frames into messages and serializing reads.
         self.recv_messages = Assembler()
 
-        # Whether we are busy sending a fragmented message.
-        self.send_in_progress = False
-
         # Deadline for the closing handshake.
         self.close_deadline: Optional[Deadline] = None
 
+        # Protect sending fragmented messages.
+        self.fragmented_send_waiter: Optional[asyncio.Future[None]] = None
+
         # Mapping of ping IDs to pong waiters, in chronological order.
-        self.pings: Dict[bytes, asyncio.Future] = {}
+        self.pings: Dict[bytes, Tuple[asyncio.Future[float], float]] = {}
 
         # Exception raised in recv_events, to be chained to ConnectionClosed
         # in the user thread in order to show why the TCP connection dropped.
@@ -137,13 +137,17 @@ class Connection(asyncio.Protocol):
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
-        await self.close(1000 if exc_type is None else 1011)
+        if exc_type is None:
+            await self.close()
+        else:
+            await self.close(CloseCode.INTERNAL_ERROR)
 
     async def __aiter__(self) -> Iterator[Data]:
         """
         Iterate on incoming messages.
 
-        The iterator calls :meth:`recv` and yields messages in an infinite loop.
+        The iterator calls :meth:`recv` and yields messages asynchronously in an
+        infinite loop.
 
         It exits when the connection is closed normally. It raises a
         :exc:`~websockets.exceptions.ConnectionClosedError` exception after a
@@ -203,6 +207,8 @@ class Connection(asyncio.Protocol):
         """
         Receive the next message frame by frame.
 
+        Canceling :meth:`send` is discouraged. TODO is it recoverable?
+
         If the message is fragmented, yield each fragment as it is received.
         The iterator must be fully consumed, or else the connection will become
         unusable.
@@ -233,7 +239,7 @@ class Connection(asyncio.Protocol):
                 "is already running recv or recv_streaming"
             ) from None
 
-    async def send(self, message: Union[Data, Iterable[Data]]) -> None:
+    async def send(self, message: Data | Iterable[Data] | AsyncIterable[Data]) -> None:
         """
         Send a message.
 
@@ -244,17 +250,30 @@ class Connection(asyncio.Protocol):
         .. _Text: https://www.rfc-editor.org/rfc/rfc6455.html#section-5.6
         .. _Binary: https://www.rfc-editor.org/rfc/rfc6455.html#section-5.6
 
-        :meth:`send` also accepts an iterable of strings, bytestrings, or
-        bytes-like objects to enable fragmentation_. Each item is treated as a
-        message fragment and sent in its own frame. All items must be of the
-        same type, or else :meth:`send` will raise a :exc:`TypeError` and the
-        connection will be closed.
+        :meth:`send` also accepts an iterable or an asynchronous iterable of
+        strings, bytestrings, or bytes-like objects to enable fragmentation_.
+        Each item is treated as a message fragment and sent in its own frame.
+        All items must be of the same type, or else :meth:`send` will raise a
+        :exc:`TypeError` and the connection will be closed.
 
         .. _fragmentation: https://www.rfc-editor.org/rfc/rfc6455.html#section-5.4
 
         :meth:`send` rejects dict-like objects because this is often an error.
         (If you really want to send the keys of a dict-like object as fragments,
         call its :meth:`~dict.keys` method and pass the result to :meth:`send`.)
+
+        Canceling :meth:`send` is discouraged. Instead, you should close the
+        connection with :meth:`close`. Indeed, there are only two situations
+        where :meth:`send` may yield control to the event loop and then get
+        canceled; in both cases, :meth:`close` has the same effect and is
+        more clear:
+
+        1. The write buffer is full. If you don't want to wait until enough
+           data is sent, your only alternative is to close the connection.
+           :meth:`close` will likely time out then abort the TCP connection.
+        2. ``message`` is an asynchronous iterator that yields control.
+           Stopping in the middle of a fragmented message will cause a
+           protocol error and the connection will be closed.
 
         When the connection is closed, :meth:`send` raises
         :exc:`~websockets.exceptions.ConnectionClosed`. Specifically, it
@@ -272,6 +291,11 @@ class Connection(asyncio.Protocol):
             TypeError: If ``message`` doesn't have a supported type.
 
         """
+        # While sending a fragmented message, prevent sending other messages
+        # until all fragments are sent.
+        while self.fragmented_send_waiter is not None:
+            await asyncio.shield(self.fragmented_send_waiter)
+
         # Unfragmented message -- this case must be handled first because
         # strings and bytes-like objects are iterable.
 
