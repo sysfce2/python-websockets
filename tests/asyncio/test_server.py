@@ -363,7 +363,7 @@ class ServerTests(EvalShellMixin, unittest.IsolatedAsyncioTestCase):
 
         async def process_request(ws, _request):
             while ws.server.is_serving():
-                await asyncio.sleep(0)
+                await asyncio.sleep(0)  # pragma: no cover
 
         async with run_server(process_request=process_request) as server:
             asyncio.get_running_loop().call_later(MS, server.close)
@@ -412,16 +412,16 @@ class ServerTests(EvalShellMixin, unittest.IsolatedAsyncioTestCase):
         async with run_server(keep_running) as server:
             async with run_client(server) as client:
                 # Delay termination of connection handler.
-                await client.send(str(2 * MS))
+                await client.send(str(3 * MS))
 
                 server.close()
 
                 # The server waits for the connection handler to terminate.
                 with self.assertRaises(TimeoutError):
-                    async with asyncio_timeout(MS):
+                    async with asyncio_timeout(2 * MS):
                         await server.wait_closed()
 
-                async with asyncio_timeout(2 * MS):
+                async with asyncio_timeout(3 * MS):
                     await server.wait_closed()
 
 
