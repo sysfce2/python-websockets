@@ -67,6 +67,18 @@ Backwards-incompatible changes
     Aliases for deprecated API were removed from ``__all__``. As a consequence,
     they cannot be imported e.g. with ``from websockets import *`` anymore.
 
+.. admonition:: Several API raise :exc:`ValueError` instead of :exc:`TypeError`
+    for invalid arguments.
+    :class: note
+
+    :func:`~asyncio.client.connect`, :func:`~asyncio.client.unix_connect`, and
+    :func:`~asyncio.server.basic_auth` in the :mod:`asyncio` implementation as
+    well as :func:`~sync.client.connect`, :func:`~sync.client.unix_connect`,
+    :func:`~sync.server.serve`, :func:`~sync.server.unix_serve`, and
+    :func:`~sync.server.basic_auth` raise :exc:`ValueError` when a required
+    argument isn't provided or an argument is provided that is incompatible with
+    others.
+
 .. admonition:: :attr:`Frame.data <frames.Frame.data>` is now a bytes-like object.
     :class: note
 
