@@ -37,14 +37,6 @@ class SimpleQueueTests(unittest.IsolatedAsyncioTestCase):
         item = await getter_task
         self.assertEqual(item, 42)
 
-    async def test_get_concurrently(self):
-        """get cannot be called concurrently."""
-        getter_task = asyncio.create_task(self.queue.get())
-        await asyncio.sleep(0)  # let the task start
-        with self.assertRaises(ConcurrencyError):
-            await self.queue.get()
-        getter_task.cancel()
-
     async def test_reset(self):
         """reset sets the content of the queue."""
         self.queue.reset([42])
@@ -58,13 +50,6 @@ class SimpleQueueTests(unittest.IsolatedAsyncioTestCase):
         self.queue.abort()
         with self.assertRaises(EOFError):
             await getter_task
-
-    async def test_abort_clears_queue(self):
-        """abort clears buffered data from the queue."""
-        self.queue.put(42)
-        self.assertEqual(len(self.queue), 1)
-        self.queue.abort()
-        self.assertEqual(len(self.queue), 0)
 
 
 class AssemblerTests(unittest.IsolatedAsyncioTestCase):
@@ -168,7 +153,7 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message, "tea")
 
     async def test_get_resumes_reading(self):
-        """get resumes reading when queue goes below the high-water mark."""
+        """get resumes reading when queue goes below the low-water mark."""
         self.assembler.put(Frame(OP_TEXT, b"caf\xc3\xa9"))
         self.assembler.put(Frame(OP_TEXT, b"more caf\xc3\xa9"))
         self.assembler.put(Frame(OP_TEXT, b"water"))
@@ -184,6 +169,19 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         # queue is below the low-water mark
         await self.assembler.get()
         self.resume.assert_called_once_with()
+
+    async def test_get_does_not_resume_reading(self):
+        """get does not resume reading when the low-water mark is unset."""
+        self.assembler.low = None
+
+        self.assembler.put(Frame(OP_TEXT, b"caf\xc3\xa9"))
+        self.assembler.put(Frame(OP_TEXT, b"more caf\xc3\xa9"))
+        self.assembler.put(Frame(OP_TEXT, b"water"))
+        await self.assembler.get()
+        await self.assembler.get()
+        await self.assembler.get()
+
+        self.resume.assert_not_called()
 
     async def test_cancel_get_before_first_frame(self):
         """get can be canceled safely before reading the first frame."""
@@ -317,7 +315,7 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fragments, ["t", "e", "a"])
 
     async def test_get_iter_resumes_reading(self):
-        """get_iter resumes reading when queue goes below the high-water mark."""
+        """get_iter resumes reading when queue goes below the low-water mark."""
         self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
         self.assembler.put(Frame(OP_CONT, b"e", fin=False))
         self.assembler.put(Frame(OP_CONT, b"a"))
@@ -335,6 +333,20 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         # queue is below the low-water mark
         await anext(iterator)
         self.resume.assert_called_once_with()
+
+    async def test_get_iter_does_not_resume_reading(self):
+        """get_iter does not resume reading when the low-water mark is unset."""
+        self.assembler.low = None
+
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"a"))
+        iterator = aiter(self.assembler.get_iter())
+        await anext(iterator)
+        await anext(iterator)
+        await anext(iterator)
+
+        self.resume.assert_not_called()
 
     async def test_cancel_get_iter_before_first_frame(self):
         """get_iter can be canceled safely before reading the first frame."""
@@ -382,6 +394,17 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         self.assembler.put(Frame(OP_CONT, b"a"))
         self.pause.assert_called_once_with()
 
+    async def test_put_does_not_pause_reading(self):
+        """put does not pause reading when the high-water mark is unset."""
+        self.assembler.high = None
+
+        self.assembler.put(Frame(OP_TEXT, b"caf\xc3\xa9"))
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"a"))
+
+        self.pause.assert_not_called()
+
     # Test termination
 
     async def test_get_fails_when_interrupted_by_close(self):
@@ -409,6 +432,58 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(EOFError):
             async for _ in self.assembler.get_iter():
                 self.fail("no fragment expected")
+
+    async def test_get_queued_message_after_close(self):
+        """get returns a message after close is called."""
+        self.assembler.put(Frame(OP_TEXT, b"caf\xc3\xa9"))
+        self.assembler.close()
+        message = await self.assembler.get()
+        self.assertEqual(message, "café")
+
+    async def test_get_iter_queued_message_after_close(self):
+        """get_iter yields a message after close is called."""
+        self.assembler.put(Frame(OP_TEXT, b"caf\xc3\xa9"))
+        self.assembler.close()
+        fragments = await alist(self.assembler.get_iter())
+        self.assertEqual(fragments, ["café"])
+
+    async def test_get_queued_fragmented_message_after_close(self):
+        """get reassembles a fragmented message after close is called."""
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"a"))
+        self.assembler.close()
+        self.assembler.close()
+        message = await self.assembler.get()
+        self.assertEqual(message, b"tea")
+
+    async def test_get_iter_queued_fragmented_message_after_close(self):
+        """get_iter yields a fragmented message after close is called."""
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"a"))
+        self.assembler.close()
+        fragments = await alist(self.assembler.get_iter())
+        self.assertEqual(fragments, [b"t", b"e", b"a"])
+
+    async def test_get_partially_queued_fragmented_message_after_close(self):
+        """get raises EOF on a partial fragmented message after close is called."""
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.close()
+        with self.assertRaises(EOFError):
+            await self.assembler.get()
+
+    async def test_get_iter_partially_queued_fragmented_message_after_close(self):
+        """get_iter yields a partial fragmented message after close is called."""
+        self.assembler.put(Frame(OP_BINARY, b"t", fin=False))
+        self.assembler.put(Frame(OP_CONT, b"e", fin=False))
+        self.assembler.close()
+        fragments = []
+        with self.assertRaises(EOFError):
+            async for fragment in self.assembler.get_iter():
+                fragments.append(fragment)
+        self.assertEqual(fragments, [b"t", b"e"])
 
     async def test_put_fails_after_close(self):
         """put raises EOFError after close is called."""
@@ -458,15 +533,28 @@ class AssemblerTests(unittest.IsolatedAsyncioTestCase):
     # Test setting limits
 
     async def test_set_high_water_mark(self):
-        """high sets the high-water mark."""
+        """high sets the high-water and low-water marks."""
         assembler = Assembler(high=10)
         self.assertEqual(assembler.high, 10)
+        self.assertEqual(assembler.low, 2)
 
-    async def test_set_high_and_low_water_mark(self):
-        """high sets the high-water mark and low-water mark."""
+    async def test_set_low_water_mark(self):
+        """low sets the low-water and high-water marks."""
+        assembler = Assembler(low=5)
+        self.assertEqual(assembler.low, 5)
+        self.assertEqual(assembler.high, 20)
+
+    async def test_set_high_and_low_water_marks(self):
+        """high and low set the high-water and low-water marks."""
         assembler = Assembler(high=10, low=5)
         self.assertEqual(assembler.high, 10)
         self.assertEqual(assembler.low, 5)
+
+    async def test_unset_high_and_low_water_marks(self):
+        """High-water and low-water marks are unset."""
+        assembler = Assembler()
+        self.assertEqual(assembler.high, None)
+        self.assertEqual(assembler.low, None)
 
     async def test_set_invalid_high_water_mark(self):
         """high must be a non-negative integer."""

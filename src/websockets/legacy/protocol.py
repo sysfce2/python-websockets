@@ -9,6 +9,7 @@ import ssl
 import struct
 import sys
 import time
+import traceback
 import uuid
 import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable, Mapping
@@ -1246,7 +1247,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
                         self.logger.debug("% received keepalive pong")
                     except asyncio.TimeoutError:
                         if self.debug:
-                            self.logger.debug("! timed out waiting for keepalive pong")
+                            self.logger.debug("- timed out waiting for keepalive pong")
                         self.fail_connection(
                             CloseCode.INTERNAL_ERROR,
                             "keepalive ping timeout",
@@ -1288,7 +1289,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
                 if await self.wait_for_connection_lost():
                     return
                 if self.debug:
-                    self.logger.debug("! timed out waiting for TCP close")
+                    self.logger.debug("- timed out waiting for TCP close")
 
             # Half-close the TCP connection if possible (when there's no TLS).
             if self.transport.can_write_eof():
@@ -1306,7 +1307,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
                 if await self.wait_for_connection_lost():
                     return
                 if self.debug:
-                    self.logger.debug("! timed out waiting for TCP close")
+                    self.logger.debug("- timed out waiting for TCP close")
 
         finally:
             # The try/finally ensures that the transport never remains open,
@@ -1332,7 +1333,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         if await self.wait_for_connection_lost():
             return
         if self.debug:
-            self.logger.debug("! timed out waiting for TCP close")
+            self.logger.debug("- timed out waiting for TCP close")
 
         # Abort the TCP connection. Buffers are discarded.
         if self.debug:
@@ -1624,8 +1625,12 @@ def broadcast(
                 exceptions.append(exception)
             else:
                 websocket.logger.warning(
-                    "skipped broadcast: failed to write message",
-                    exc_info=True,
+                    "skipped broadcast: failed to write message: %s",
+                    traceback.format_exception_only(
+                        # Remove first argument when dropping Python 3.9.
+                        type(write_exception),
+                        write_exception,
+                    )[0].strip(),
                 )
 
     if raise_exceptions and exceptions:

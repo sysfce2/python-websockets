@@ -7,6 +7,7 @@ import logging
 import random
 import struct
 import sys
+import traceback
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable, Mapping
 from types import TracebackType
@@ -55,14 +56,14 @@ class Connection(asyncio.Protocol):
         ping_interval: float | None = 20,
         ping_timeout: float | None = 20,
         close_timeout: float | None = 10,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
         write_limit: int | tuple[int, int | None] = 2**15,
     ) -> None:
         self.protocol = protocol
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
         self.close_timeout = close_timeout
-        if isinstance(max_queue, int):
+        if isinstance(max_queue, int) or max_queue is None:
             max_queue = (max_queue, None)
         self.max_queue = max_queue
         if isinstance(write_limit, int):
@@ -183,6 +184,30 @@ class Connection(asyncio.Protocol):
 
         """
         return self.protocol.subprotocol
+
+    @property
+    def close_code(self) -> int | None:
+        """
+        State of the WebSocket connection, defined in :rfc:`6455`.
+
+        This attribute is provided for completeness. Typical applications
+        shouldn't check its value. Instead, they should inspect attributes
+        of :exc:`~websockets.exceptions.ConnectionClosed` exceptions.
+
+        """
+        return self.protocol.close_code
+
+    @property
+    def close_reason(self) -> str | None:
+        """
+        State of the WebSocket connection, defined in :rfc:`6455`.
+
+        This attribute is provided for completeness. Typical applications
+        shouldn't check its value. Instead, they should inspect attributes
+        of :exc:`~websockets.exceptions.ConnectionClosed` exceptions.
+
+        """
+        return self.protocol.close_reason
 
     # Public methods
 
@@ -785,7 +810,7 @@ class Connection(asyncio.Protocol):
                         self.logger.debug("% received keepalive pong")
                     except asyncio.TimeoutError:
                         if self.debug:
-                            self.logger.debug("! timed out waiting for keepalive pong")
+                            self.logger.debug("- timed out waiting for keepalive pong")
                         async with self.send_context():
                             self.protocol.fail(
                                 CloseCode.INTERNAL_ERROR,
@@ -866,7 +891,7 @@ class Connection(asyncio.Protocol):
                     await self.drain()
                 except Exception as exc:
                     if self.debug:
-                        self.logger.debug("error while sending data", exc_info=True)
+                        self.logger.debug("! error while sending data", exc_info=True)
                     # While the only expected exception here is OSError,
                     # other exceptions would be treated identically.
                     wait_for_close = False
@@ -1042,7 +1067,7 @@ class Connection(asyncio.Protocol):
             self.send_data()
         except Exception as exc:
             if self.debug:
-                self.logger.debug("error while sending data", exc_info=True)
+                self.logger.debug("! error while sending data", exc_info=True)
             self.set_recv_exc(exc)
 
         if self.protocol.close_expected():
@@ -1180,8 +1205,12 @@ def broadcast(
                 exceptions.append(exception)
             else:
                 connection.logger.warning(
-                    "skipped broadcast: failed to write message",
-                    exc_info=True,
+                    "skipped broadcast: failed to write message: %s",
+                    traceback.format_exception_only(
+                        # Remove first argument when dropping Python 3.9.
+                        type(write_exception),
+                        write_exception,
+                    )[0].strip(),
                 )
 
     if raise_exceptions and exceptions:

@@ -35,8 +35,8 @@ Instead, when running as a server, websockets logs one event when a
 `connection is established`_ and another event when a `connection is
 closed`_.
 
-.. _connection is established: https://www.rfc-editor.org/rfc/rfc6455.html#section-4
-.. _connection is closed: https://www.rfc-editor.org/rfc/rfc6455.html#section-7.1.4
+.. _connection is established: https://datatracker.ietf.org/doc/html/rfc6455.html#section-4
+.. _connection is closed: https://datatracker.ietf.org/doc/html/rfc6455.html#section-7.1.4
 
 By default, websockets doesn't log an event for every message. That would be
 excessive for many applications exchanging small messages at a fast rate. If
@@ -218,7 +218,10 @@ Here's what websockets logs at each level.
 ``ERROR``
 .........
 
-* Exceptions raised by connection handler coroutines in servers
+* Exceptions raised by your code in servers
+    * connection handler coroutines
+    * ``select_subprotocol`` callbacks
+    * ``process_request`` and ``process_response`` callbacks
 * Exceptions resulting from bugs in websockets
 
 ``WARNING``
@@ -250,4 +253,5 @@ Debug messages have cute prefixes that make logs easier to scan:
 * ``=`` - set connection state
 * ``x`` - shut down connection
 * ``%`` - manage pings and pongs
-* ``!`` - handle errors and timeouts
+* ``-`` - timeout
+* ``!`` - error, with a traceback

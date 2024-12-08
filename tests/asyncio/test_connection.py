@@ -19,7 +19,7 @@ from websockets.frames import CloseCode, Frame, Opcode
 from websockets.protocol import CLIENT, SERVER, Protocol, State
 
 from ..protocol import RecordingProtocol
-from ..utils import MS
+from ..utils import MS, AssertNoLogsMixin
 from .connection import InterceptingConnection
 from .utils import alist
 
@@ -28,7 +28,7 @@ from .utils import alist
 # All tests run on the client side and the server side to validate this.
 
 
-class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
+class ClientConnectionTests(AssertNoLogsMixin, unittest.IsolatedAsyncioTestCase):
     LOCAL = CLIENT
     REMOTE = SERVER
 
@@ -47,23 +47,6 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.remote_connection.close()
         await self.connection.close()
-
-    if sys.version_info[:2] < (3, 10):  # pragma: no cover
-
-        @contextlib.contextmanager
-        def assertNoLogs(self, logger="websockets", level=logging.ERROR):
-            """
-            No message is logged on the given logger with at least the given level.
-
-            """
-            with self.assertLogs(logger, level) as logs:
-                # We want to test that no log message is emitted
-                # but assertLogs expects at least one log message.
-                logging.getLogger(logger).log(level, "dummy")
-                yield
-
-            level_name = logging.getLevelName(level)
-            self.assertEqual(logs.output, [f"{level_name}:{logger}:dummy"])
 
     # Test helpers built upon RecordingProtocol and InterceptingConnection.
 
@@ -810,14 +793,12 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
         # Remove socket.timeout when dropping Python < 3.10.
         self.assertIsInstance(exc.__cause__, (socket.timeout, TimeoutError))
 
-    async def test_close_does_not_wait_for_recv(self):
-        # Closing the connection discards messages buffered in the assembler.
-        # This is allowed by the RFC:
-        # > However, there is no guarantee that the endpoint that has already
-        # > sent a Close frame will continue to process data.
+    async def test_close_preserves_queued_messages(self):
+        """close preserves messages buffered in the assembler."""
         await self.remote_connection.send("😀")
         await self.connection.close()
 
+        self.assertEqual(await self.connection.recv(), "😀")
         with self.assertRaises(ConnectionClosedOK) as raised:
             await self.connection.recv()
 
@@ -1085,14 +1066,22 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.close_timeout, 42 * MS)
 
     async def test_max_queue(self):
-        """max_queue parameter configures high-water mark of frames buffer."""
+        """max_queue configures high-water mark of frames buffer."""
         connection = Connection(Protocol(self.LOCAL), max_queue=4)
         transport = Mock()
         connection.connection_made(transport)
         self.assertEqual(connection.recv_messages.high, 4)
 
+    async def test_max_queue_none(self):
+        """max_queue disables high-water mark of frames buffer."""
+        connection = Connection(Protocol(self.LOCAL), max_queue=None)
+        transport = Mock()
+        connection.connection_made(transport)
+        self.assertEqual(connection.recv_messages.high, None)
+        self.assertEqual(connection.recv_messages.low, None)
+
     async def test_max_queue_tuple(self):
-        """max_queue parameter configures high-water mark of frames buffer."""
+        """max_queue configures high-water and low-water marks of frames buffer."""
         connection = Connection(
             Protocol(self.LOCAL),
             max_queue=(4, 2),
@@ -1150,7 +1139,7 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_state(self):
         """Connection has a state attribute."""
-        self.assertEqual(self.connection.state, State.OPEN)
+        self.assertIs(self.connection.state, State.OPEN)
 
     async def test_request(self):
         """Connection has a request attribute."""
@@ -1163,6 +1152,14 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_subprotocol(self):
         """Connection has a subprotocol attribute."""
         self.assertIsNone(self.connection.subprotocol)
+
+    async def test_close_code(self):
+        """Connection has a close_code attribute."""
+        self.assertIsNone(self.connection.close_code)
+
+    async def test_close_reason(self):
+        """Connection has a close_reason attribute."""
+        self.assertIsNone(self.connection.close_reason)
 
     # Test reporting of network errors.
 
@@ -1277,7 +1274,7 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
         await self.connection.close()
         await self.assertFrameSent(Frame(Opcode.CLOSE, b"\x03\xe8"))
 
-        with self.assertNoLogs():
+        with self.assertNoLogs("websockets", logging.WARNING):
             broadcast([self.connection], "😀")
         await self.assertNoFrameSent()
 
@@ -1288,7 +1285,7 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             await self.assertFrameSent(Frame(Opcode.CLOSE, b"\x03\xe8"))
 
-            with self.assertNoLogs():
+            with self.assertNoLogs("websockets", logging.WARNING):
                 broadcast([self.connection], "😀")
             await self.assertNoFrameSent()
 
@@ -1354,7 +1351,10 @@ class ClientConnectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [record.getMessage() for record in logs.records],
-            ["skipped broadcast: failed to write message"],
+            [
+                "skipped broadcast: failed to write message: "
+                "RuntimeError: Cannot call write() after write_eof()"
+            ],
         )
 
     @unittest.skipIf(

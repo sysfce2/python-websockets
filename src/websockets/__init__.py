@@ -31,6 +31,7 @@ __all__ = [
     "InvalidHeader",
     "InvalidHeaderFormat",
     "InvalidHeaderValue",
+    "InvalidMessage",
     "InvalidOrigin",
     "InvalidParameterName",
     "InvalidParameterValue",
@@ -71,6 +72,7 @@ if typing.TYPE_CHECKING:
         InvalidHeader,
         InvalidHeaderFormat,
         InvalidHeaderValue,
+        InvalidMessage,
         InvalidOrigin,
         InvalidParameterName,
         InvalidParameterValue,
@@ -122,6 +124,7 @@ else:
             "InvalidHeader": ".exceptions",
             "InvalidHeaderFormat": ".exceptions",
             "InvalidHeaderValue": ".exceptions",
+            "InvalidMessage": ".exceptions",
             "InvalidOrigin": ".exceptions",
             "InvalidParameterName": ".exceptions",
             "InvalidParameterValue": ".exceptions",
@@ -151,7 +154,7 @@ else:
             "handshake": ".legacy",
             "parse_uri": ".uri",
             "WebSocketURI": ".uri",
-            # deprecated in 14.0
+            # deprecated in 14.0 - 2024-11-09
             # .legacy.auth
             "BasicAuthWebSocketServerProtocol": ".legacy.auth",
             "basic_auth_protocol_factory": ".legacy.auth",
@@ -159,7 +162,6 @@ else:
             "WebSocketClientProtocol": ".legacy.client",
             # .legacy.exceptions
             "AbortHandshake": ".legacy.exceptions",
-            "InvalidMessage": ".legacy.exceptions",
             "InvalidStatusCode": ".legacy.exceptions",
             "RedirectHandshake": ".legacy.exceptions",
             "WebSocketProtocolError": ".legacy.exceptions",

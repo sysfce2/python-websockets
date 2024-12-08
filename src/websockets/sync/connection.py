@@ -49,12 +49,12 @@ class Connection:
         protocol: Protocol,
         *,
         close_timeout: float | None = 10,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
     ) -> None:
         self.socket = socket
         self.protocol = protocol
         self.close_timeout = close_timeout
-        if isinstance(max_queue, int):
+        if isinstance(max_queue, int) or max_queue is None:
             max_queue = (max_queue, None)
         self.max_queue = max_queue
 
@@ -141,6 +141,19 @@ class Connection:
         return self.socket.getpeername()
 
     @property
+    def state(self) -> State:
+        """
+        State of the WebSocket connection, defined in :rfc:`6455`.
+
+        This attribute is provided for completeness. Typical applications
+        shouldn't check its value. Instead, they should call :meth:`~recv` or
+        :meth:`send` and handle :exc:`~websockets.exceptions.ConnectionClosed`
+        exceptions.
+
+        """
+        return self.protocol.state
+
+    @property
     def subprotocol(self) -> Subprotocol | None:
         """
         Subprotocol negotiated during the opening handshake.
@@ -149,6 +162,30 @@ class Connection:
 
         """
         return self.protocol.subprotocol
+
+    @property
+    def close_code(self) -> int | None:
+        """
+        State of the WebSocket connection, defined in :rfc:`6455`.
+
+        This attribute is provided for completeness. Typical applications
+        shouldn't check its value. Instead, they should inspect attributes
+        of :exc:`~websockets.exceptions.ConnectionClosed` exceptions.
+
+        """
+        return self.protocol.close_code
+
+    @property
+    def close_reason(self) -> str | None:
+        """
+        State of the WebSocket connection, defined in :rfc:`6455`.
+
+        This attribute is provided for completeness. Typical applications
+        shouldn't check its value. Instead, they should inspect attributes
+        of :exc:`~websockets.exceptions.ConnectionClosed` exceptions.
+
+        """
+        return self.protocol.close_reason
 
     # Public methods
 
@@ -640,7 +677,10 @@ class Connection:
                     data = self.socket.recv(self.recv_bufsize)
                 except Exception as exc:
                     if self.debug:
-                        self.logger.debug("error while receiving data", exc_info=True)
+                        self.logger.debug(
+                            "! error while receiving data",
+                            exc_info=True,
+                        )
                     # When the closing handshake is initiated by our side,
                     # recv() may block until send_context() closes the socket.
                     # In that case, send_context() already set recv_exc.
@@ -665,7 +705,10 @@ class Connection:
                         self.send_data()
                     except Exception as exc:
                         if self.debug:
-                            self.logger.debug("error while sending data", exc_info=True)
+                            self.logger.debug(
+                                "! error while sending data",
+                                exc_info=True,
+                            )
                         # Similarly to the above, avoid overriding an exception
                         # set by send_context(), in case of a race condition
                         # i.e. send_context() closes the socket after recv()
@@ -783,7 +826,10 @@ class Connection:
                         self.send_data()
                     except Exception as exc:
                         if self.debug:
-                            self.logger.debug("error while sending data", exc_info=True)
+                            self.logger.debug(
+                                "! error while sending data",
+                                exc_info=True,
+                            )
                         # While the only expected exception here is OSError,
                         # other exceptions would be treated identically.
                         wait_for_close = False
