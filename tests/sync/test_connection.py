@@ -1,6 +1,5 @@
 import contextlib
 import logging
-import platform
 import socket
 import sys
 import threading
@@ -15,7 +14,7 @@ from websockets.exceptions import (
     ConnectionClosedOK,
 )
 from websockets.frames import CloseCode, Frame, Opcode
-from websockets.protocol import CLIENT, SERVER, Protocol
+from websockets.protocol import CLIENT, SERVER, Protocol, State
 from websockets.sync.connection import *
 
 from ..protocol import RecordingProtocol
@@ -543,17 +542,12 @@ class ClientConnectionTests(unittest.TestCase):
         # Remove socket.timeout when dropping Python < 3.10.
         self.assertIsInstance(exc.__cause__, (socket.timeout, TimeoutError))
 
-    def test_close_does_not_wait_for_recv(self):
-        # Closing the connection discards messages buffered in the assembler.
-        # This is allowed by the RFC:
-        # > However, there is no guarantee that the endpoint that has already
-        # > sent a Close frame will continue to process data.
+    def test_close_preserves_queued_messages(self):
+        """close preserves messages buffered in the assembler."""
         self.remote_connection.send("😀")
         self.connection.close()
 
-        close_thread = threading.Thread(target=self.connection.close)
-        close_thread.start()
-
+        self.assertEqual(self.connection.recv(), "😀")
         with self.assertRaises(ConnectionClosedOK) as raised:
             self.connection.recv()
 
@@ -569,17 +563,13 @@ class ClientConnectionTests(unittest.TestCase):
         self.connection.close()
         self.assertNoFrameSent()
 
-    @unittest.skipIf(
-        platform.python_implementation() == "PyPy",
-        "this test fails randomly due to a bug in PyPy",  # see #1314 for details
-    )
     def test_close_idempotency_race_condition(self):
         """close waits if the connection is already closing."""
 
-        self.connection.close_timeout = 5 * MS
+        self.connection.close_timeout = 6 * MS
 
         def closer():
-            with self.delay_frames_rcvd(3 * MS):
+            with self.delay_frames_rcvd(4 * MS):
                 self.connection.close()
 
         close_thread = threading.Thread(target=closer)
@@ -591,14 +581,14 @@ class ClientConnectionTests(unittest.TestCase):
 
         # Connection isn't closed yet.
         with self.assertRaises(TimeoutError):
-            self.connection.recv(timeout=0)
+            self.connection.recv(timeout=MS)
 
         self.connection.close()
         self.assertNoFrameSent()
 
         # Connection is closed now.
         with self.assertRaises(ConnectionClosedOK):
-            self.connection.recv(timeout=0)
+            self.connection.recv(timeout=MS)
 
         close_thread.join()
 
@@ -688,7 +678,7 @@ class ClientConnectionTests(unittest.TestCase):
         self.assertFalse(pong_waiter.wait(MS))
 
     def test_acknowledge_previous_ping(self):
-        """ping is acknowledged by a pong with the same payload as a later ping."""
+        """ping is acknowledged by a pong for as a later ping."""
         with self.drop_frames_rcvd():  # drop automatic response to ping
             pong_waiter = self.connection.ping("this")
             self.connection.ping("that")
@@ -754,7 +744,7 @@ class ClientConnectionTests(unittest.TestCase):
         self.assertEqual(connection.close_timeout, 42 * MS)
 
     def test_max_queue(self):
-        """max_queue parameter configures high-water mark of frames buffer."""
+        """max_queue configures high-water mark of frames buffer."""
         socket_, remote_socket = socket.socketpair()
         self.addCleanup(socket_.close)
         self.addCleanup(remote_socket.close)
@@ -765,8 +755,21 @@ class ClientConnectionTests(unittest.TestCase):
         )
         self.assertEqual(connection.recv_messages.high, 4)
 
+    def test_max_queue_none(self):
+        """max_queue disables high-water mark of frames buffer."""
+        socket_, remote_socket = socket.socketpair()
+        self.addCleanup(socket_.close)
+        self.addCleanup(remote_socket.close)
+        connection = Connection(
+            socket_,
+            Protocol(self.LOCAL),
+            max_queue=None,
+        )
+        self.assertEqual(connection.recv_messages.high, None)
+        self.assertEqual(connection.recv_messages.high, None)
+
     def test_max_queue_tuple(self):
-        """max_queue parameter configures high-water mark of frames buffer."""
+        """max_queue configures high-water and low-water marks of frames buffer."""
         socket_, remote_socket = socket.socketpair()
         self.addCleanup(socket_.close)
         self.addCleanup(remote_socket.close)
@@ -800,6 +803,10 @@ class ClientConnectionTests(unittest.TestCase):
         self.assertEqual(self.connection.remote_address, ("peer", 1234))
         getpeername.assert_called_with()
 
+    def test_state(self):
+        """Connection has a state attribute."""
+        self.assertIs(self.connection.state, State.OPEN)
+
     def test_request(self):
         """Connection has a request attribute."""
         self.assertIsNone(self.connection.request)
@@ -811,6 +818,14 @@ class ClientConnectionTests(unittest.TestCase):
     def test_subprotocol(self):
         """Connection has a subprotocol attribute."""
         self.assertIsNone(self.connection.subprotocol)
+
+    def test_close_code(self):
+        """Connection has a close_code attribute."""
+        self.assertIsNone(self.connection.close_code)
+
+    def test_close_reason(self):
+        """Connection has a close_reason attribute."""
+        self.assertIsNone(self.connection.close_reason)
 
     # Test reporting of network errors.
 

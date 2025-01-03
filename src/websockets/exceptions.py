@@ -8,7 +8,7 @@
     * :exc:`InvalidURI`
     * :exc:`InvalidHandshake`
         * :exc:`SecurityError`
-        * :exc:`InvalidMessage` (legacy)
+        * :exc:`InvalidMessage`
         * :exc:`InvalidStatus`
         * :exc:`InvalidStatusCode` (legacy)
         * :exc:`InvalidHeader`
@@ -48,6 +48,7 @@ __all__ = [
     "InvalidHeader",
     "InvalidHeaderFormat",
     "InvalidHeaderValue",
+    "InvalidMessage",
     "InvalidOrigin",
     "InvalidUpgrade",
     "NegotiationError",
@@ -113,7 +114,7 @@ class ConnectionClosed(WebSocketException):
 
     @property
     def code(self) -> int:
-        warnings.warn(  # deprecated in 13.1
+        warnings.warn(  # deprecated in 13.1 - 2024-09-21
             "ConnectionClosed.code is deprecated; "
             "use Protocol.close_code or ConnectionClosed.rcvd.code",
             DeprecationWarning,
@@ -124,7 +125,7 @@ class ConnectionClosed(WebSocketException):
 
     @property
     def reason(self) -> str:
-        warnings.warn(  # deprecated in 13.1
+        warnings.warn(  # deprecated in 13.1 - 2024-09-21
             "ConnectionClosed.reason is deprecated; "
             "use Protocol.close_reason or ConnectionClosed.rcvd.reason",
             DeprecationWarning,
@@ -181,6 +182,13 @@ class SecurityError(InvalidHandshake):
 
     Security limits can be configured with :doc:`environment variables
     <../reference/variables>`.
+
+    """
+
+
+class InvalidMessage(InvalidHandshake):
+    """
+    Raised when a handshake request or response is malformed.
 
     """
 
@@ -334,6 +342,47 @@ class PayloadTooBig(WebSocketException):
 
     """
 
+    def __init__(
+        self,
+        size_or_message: int | None | str,
+        max_size: int | None = None,
+        cur_size: int | None = None,
+    ) -> None:
+        if isinstance(size_or_message, str):
+            assert max_size is None
+            assert cur_size is None
+            warnings.warn(  # deprecated in 14.0 - 2024-11-09
+                "PayloadTooBig(message) is deprecated; "
+                "change to PayloadTooBig(size, max_size)",
+                DeprecationWarning,
+            )
+            self.message: str | None = size_or_message
+        else:
+            self.message = None
+            self.size: int | None = size_or_message
+            assert max_size is not None
+            self.max_size: int = max_size
+            self.cur_size: int | None = None
+            self.set_current_size(cur_size)
+
+    def __str__(self) -> str:
+        if self.message is not None:
+            return self.message
+        else:
+            message = "frame "
+            if self.size is not None:
+                message += f"with {self.size} bytes "
+            if self.cur_size is not None:
+                message += f"after reading {self.cur_size} bytes "
+            message += f"exceeds limit of {self.max_size} bytes"
+            return message
+
+    def set_current_size(self, cur_size: int | None) -> None:
+        assert self.cur_size is None
+        if cur_size is not None:
+            self.max_size += cur_size
+            self.cur_size = cur_size
+
 
 class InvalidState(WebSocketException, AssertionError):
     """
@@ -367,9 +416,8 @@ from . import frames, http11  # noqa: E402
 lazy_import(
     globals(),
     deprecated_aliases={
-        # deprecated in 14.0
+        # deprecated in 14.0 - 2024-11-09
         "AbortHandshake": ".legacy.exceptions",
-        "InvalidMessage": ".legacy.exceptions",
         "InvalidStatusCode": ".legacy.exceptions",
         "RedirectHandshake": ".legacy.exceptions",
         "WebSocketProtocolError": ".legacy.exceptions",

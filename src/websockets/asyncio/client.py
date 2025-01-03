@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import traceback
 import urllib.parse
 from collections.abc import AsyncIterator, Generator, Sequence
 from types import TracebackType
@@ -10,7 +11,7 @@ from typing import Any, Callable
 
 from ..client import ClientProtocol, backoff
 from ..datastructures import HeadersLike
-from ..exceptions import InvalidStatus, SecurityError
+from ..exceptions import InvalidMessage, InvalidStatus, SecurityError
 from ..extensions.base import ClientExtensionFactory
 from ..extensions.permessage_deflate import enable_client_permessage_deflate
 from ..headers import validate_subprotocols
@@ -59,7 +60,7 @@ class ClientConnection(Connection):
         ping_interval: float | None = 20,
         ping_timeout: float | None = 20,
         close_timeout: float | None = 10,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
         write_limit: int | tuple[int, int | None] = 2**15,
     ) -> None:
         self.protocol: ClientProtocol
@@ -95,9 +96,9 @@ class ClientConnection(Connection):
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        # self.protocol.handshake_exc is always set when the connection is lost
-        # before receiving a response, when the response cannot be parsed, or
-        # when the response fails the handshake.
+        # self.protocol.handshake_exc is set when the connection is lost before
+        # receiving a response, when the response cannot be parsed, or when the
+        # response fails the handshake.
 
         if self.protocol.handshake_exc is not None:
             raise self.protocol.handshake_exc
@@ -146,7 +147,9 @@ def process_exception(exc: Exception) -> Exception | None:
     That exception will be raised, breaking out of the retry loop.
 
     """
-    if isinstance(exc, (EOFError, OSError, asyncio.TimeoutError)):
+    if isinstance(exc, (OSError, asyncio.TimeoutError)):
+        return None
+    if isinstance(exc, InvalidMessage) and isinstance(exc.__cause__, EOFError):
         return None
     if isinstance(exc, InvalidStatus) and exc.response.status_code in [
         500,  # Internal Server Error
@@ -181,7 +184,7 @@ class connect:
         async for websocket in connect(...):
             try:
                 ...
-            except websockets.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed:
                 continue
 
     If the connection fails with a transient error, it is retried with
@@ -221,7 +224,8 @@ class connect:
         max_queue: High-water mark of the buffer where frames are received.
             It defaults to 16 frames. The low-water mark defaults to ``max_queue
             // 4``. You may pass a ``(high, low)`` tuple to set the high-water
-            and low-water marks.
+            and low-water marks. If you want to disable flow control entirely,
+            you may set it to ``None``, although that's a bad idea.
         write_limit: High-water mark of write buffer in bytes. It is passed to
             :meth:`~asyncio.WriteTransport.set_write_buffer_limits`. It defaults
             to 32 KiB. You may pass a ``(high, low)`` tuple to set the
@@ -282,7 +286,7 @@ class connect:
         close_timeout: float | None = 10,
         # Limits
         max_size: int | None = 2**20,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
         write_limit: int | tuple[int, int | None] = 2**15,
         # Logging
         logger: LoggerLike | None = None,
@@ -521,9 +525,10 @@ class connect:
                     delays = backoff()
                 delay = next(delays)
                 self.logger.info(
-                    "! connect failed; reconnecting in %.1f seconds",
+                    "connect failed; reconnecting in %.1f seconds: %s",
                     delay,
-                    exc_info=True,
+                    # Remove first argument when dropping Python 3.9.
+                    traceback.format_exception_only(type(exc), exc)[0].strip(),
                 )
                 await asyncio.sleep(delay)
                 continue

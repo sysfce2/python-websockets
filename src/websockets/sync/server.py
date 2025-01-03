@@ -66,7 +66,7 @@ class ServerConnection(Connection):
         protocol: ServerProtocol,
         *,
         close_timeout: float | None = 10,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
     ) -> None:
         self.protocol: ServerProtocol
         self.request_rcvd = threading.Event()
@@ -170,10 +170,13 @@ class ServerConnection(Connection):
 
                 self.protocol.send_response(self.response)
 
-        # self.protocol.handshake_exc is always set when the connection is lost
-        # before receiving a request, when the request cannot be parsed, when
-        # the handshake encounters an error, or when process_request or
-        # process_response sends an HTTP response that rejects the handshake.
+        # self.protocol.handshake_exc is set when the connection is lost before
+        # receiving a request, when the request cannot be parsed, or when the
+        # handshake fails, including when process_request or process_response
+        # raises an exception.
+
+        # It isn't set when process_request or process_response sends an HTTP
+        # response that rejects the handshake.
 
         if self.protocol.handshake_exc is not None:
             raise self.protocol.handshake_exc
@@ -353,7 +356,7 @@ def serve(
     close_timeout: float | None = 10,
     # Limits
     max_size: int | None = 2**20,
-    max_queue: int | tuple[int, int | None] = 16,
+    max_queue: int | None | tuple[int | None, int | None] = 16,
     # Logging
     logger: LoggerLike | None = None,
     # Escape hatch for advanced customization
@@ -435,7 +438,8 @@ def serve(
         max_queue: High-water mark of the buffer where frames are received.
             It defaults to 16 frames. The low-water mark defaults to ``max_queue
             // 4``. You may pass a ``(high, low)`` tuple to set the high-water
-            and low-water marks.
+            and low-water marks. If you want to disable flow control entirely,
+            you may set it to ``None``, although that's a bad idea.
         logger: Logger for this server.
             It defaults to ``logging.getLogger("websockets.server")``. See the
             :doc:`logging guide <../../topics/logging>` for details.

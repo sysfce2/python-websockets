@@ -55,7 +55,7 @@ class ClientConnection(Connection):
         protocol: ClientProtocol,
         *,
         close_timeout: float | None = 10,
-        max_queue: int | tuple[int, int | None] = 16,
+        max_queue: int | None | tuple[int | None, int | None] = 16,
     ) -> None:
         self.protocol: ClientProtocol
         self.response_rcvd = threading.Event()
@@ -87,9 +87,9 @@ class ClientConnection(Connection):
         if not self.response_rcvd.wait(timeout):
             raise TimeoutError("timed out during handshake")
 
-        # self.protocol.handshake_exc is always set when the connection is lost
-        # before receiving a response, when the response cannot be parsed, or
-        # when the response fails the handshake.
+        # self.protocol.handshake_exc is set when the connection is lost before
+        # receiving a response, when the response cannot be parsed, or when the
+        # response fails the handshake.
 
         if self.protocol.handshake_exc is not None:
             raise self.protocol.handshake_exc
@@ -139,7 +139,7 @@ def connect(
     close_timeout: float | None = 10,
     # Limits
     max_size: int | None = 2**20,
-    max_queue: int | tuple[int, int | None] = 16,
+    max_queue: int | None | tuple[int | None, int | None] = 16,
     # Logging
     logger: LoggerLike | None = None,
     # Escape hatch for advanced customization
@@ -191,7 +191,8 @@ def connect(
         max_queue: High-water mark of the buffer where frames are received.
             It defaults to 16 frames. The low-water mark defaults to ``max_queue
             // 4``. You may pass a ``(high, low)`` tuple to set the high-water
-            and low-water marks.
+            and low-water marks. If you want to disable flow control entirely,
+            you may set it to ``None``, although that's a bad idea.
         logger: Logger for this client.
             It defaults to ``logging.getLogger("websockets.client")``.
             See the :doc:`logging guide <../../topics/logging>` for details.
